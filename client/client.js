@@ -33,14 +33,27 @@ window.__ModuleLoader__.load({
       return (hour >= 9 && hour < 12) || (hour >= 14 && hour < 18);
     }
 
+    /**
+     * Only official DeepSeek models carry the DeepSeek price table. Any other
+     * model (e.g. a provider's own "…-pro" like mimo-v2.5-pro) must NOT be
+     * priced against it — a naive "contains 'pro'" match would multiply the
+     * cost by 3 for unrelated models. Exact-prefix match on the deepseek-v4
+     * family; anything else is "unknown" and no cost is shown.
+     */
     function priceKeyFor(model) {
-      return model && String(model).toLowerCase().indexOf("pro") !== -1 ? "deepseek-v4-pro" : "deepseek-v4-flash";
+      var m = String(model || "").toLowerCase();
+      if (m.indexOf("deepseek-v4-pro") === 0) return "deepseek-v4-pro";
+      if (m.indexOf("deepseek-v4-flash") === 0) return "deepseek-v4-flash";
+      return null;
     }
 
-    /** Session cost in CNY from the tokenUsage projection + current model. */
+    /** Session cost in CNY from the tokenUsage projection + current model.
+     * Returns null when the model is not on the DeepSeek price table. */
     function computeCost(usage, model) {
-      if (!usage) return 0;
-      var p = PRICES[priceKeyFor(model)];
+      if (!usage) return null;
+      var key = priceKeyFor(model);
+      if (!key) return null;
+      var p = PRICES[key];
       var peak = isPeakNow() ? 1 : 0;
       var missTokens = (usage.uncachedInputTokens || 0) + (usage.cacheWriteTokens || 0);
       var cost = missTokens * p.miss[peak] / 1e6;
@@ -104,7 +117,8 @@ window.__ModuleLoader__.load({
       var dotColor = state.status === "error" ? "#f87171" : state.status === "loading" ? "#fbbf24" : "#34d399";
       var text;
       var title;
-      var cost = usage ? computeCost(usage, state.model) : 0;
+      var priceKey = priceKeyFor(state.model);
+      var cost = usage ? computeCost(usage, state.model) : null;
       var peak = isPeakNow() ? "高峰时段" : "空闲时段";
 
       if (state.status === "error") {
@@ -123,7 +137,7 @@ window.__ModuleLoader__.load({
             return (b.currency || "?") + " " + (b.total_balance != null ? b.total_balance : "?");
           }).join(" / ");
           text = "DeepSeek 余额 " + balanceText;
-          if (usage && (usage.outputTokens > 0 || (usage.uncachedInputTokens || 0) > 0 || (usage.cacheReadTokens || 0) > 0)) {
+          if (usage && cost !== null && (usage.outputTokens > 0 || (usage.uncachedInputTokens || 0) > 0 || (usage.cacheReadTokens || 0) > 0)) {
             text += " ｜ 本会话 ¥" + fmtCost(cost);
           }
           var lines = infos.map(function (b) {
@@ -140,8 +154,12 @@ window.__ModuleLoader__.load({
               "（缓存命中 " + (hit === null ? "—" : hit + "%" + "，读取 " + fmtTokens(usage.cacheReadTokens || 0) + "，写入 " + fmtTokens(usage.cacheWriteTokens || 0) + "）") +
               "，输出 " + fmtTokens(usage.outputTokens || 0)
             );
-            lines.push("计价：按 " + (state.model || "deepseek-v4-flash") + "（" + peak + "）");
-            lines.push("本次会话消费：¥" + fmtCost(cost));
+            lines.push("计价：按 " + (priceKey || "未知模型") + "（" + peak + "）");
+            if (cost === null) {
+              lines.push("当前模型 " + (state.model || "?") + " 不在 DeepSeek 定价表（仅 deepseek-v4-flash / deepseek-v4-pro），无法估算消费");
+            } else {
+              lines.push("本次会话消费：¥" + fmtCost(cost));
+            }
           }
           title = lines.join("\n");
         }

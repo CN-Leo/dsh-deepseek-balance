@@ -65,10 +65,14 @@ window.__ModuleLoader__.load({
 
     function loadBalance() {
       return fetch(ENDPOINT, { headers: { accept: "application/json" } })
-        .then(function (r) { return r.json(); })
-        .then(function (res) {
-          if (res && res.ok) return { status: "ok", data: res.data, model: res.model || "", at: res.at || Date.now() };
-          return { status: "error", message: (res && res.error) || "未知错误", at: Date.now() };
+        .then(function (r) {
+          if (!r.ok) return { status: "error", message: "余额接口 HTTP " + r.status, at: Date.now() };
+          return r.json().then(function (res) {
+            if (res && res.ok) return { status: "ok", data: res.data, model: res.model || "", at: res.at || Date.now() };
+            return { status: "error", message: (res && res.error) || "未知错误", at: Date.now() };
+          }).catch(function () {
+            return { status: "error", message: "余额接口响应不是有效 JSON", at: Date.now() };
+          });
         })
         .catch(function (err) {
           return { status: "error", message: (err && err.message) || String(err), at: Date.now() };

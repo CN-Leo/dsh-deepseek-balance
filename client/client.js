@@ -38,7 +38,7 @@ window.__ModuleLoader__.load({
      * model (e.g. a provider's own "…-pro" like mimo-v2.5-pro) must NOT be
      * priced against it — a naive "contains 'pro'" match would multiply the
      * cost by 3 for unrelated models. Exact-prefix match on the deepseek-v4
-     * family; anything else is "unknown" and no cost is shown.
+     * family; anything else is null (no cost shown).
      */
     function priceKeyFor(model) {
       var m = String(model || "").toLowerCase();
@@ -47,19 +47,27 @@ window.__ModuleLoader__.load({
       return null;
     }
 
-    /** Session cost in CNY from the tokenUsage projection + current model.
-     * Returns null when the model is not on the DeepSeek price table. */
-    function computeCost(usage, model) {
-      if (!usage) return null;
-      var key = priceKeyFor(model);
-      if (!key) return null;
-      var p = PRICES[key];
+    /**
+     * Total session cost in CNY across per-model usage entries
+     * [{ model, input, output, cacheRead, cacheWrite }]. Models outside the
+     * DeepSeek price table are skipped. Returns null when no entry is priced.
+     */
+    function totalCost(usageList) {
+      if (!Array.isArray(usageList) || usageList.length === 0) return null;
       var peak = isPeakNow() ? 1 : 0;
-      var missTokens = (usage.uncachedInputTokens || 0) + (usage.cacheWriteTokens || 0);
-      var cost = missTokens * p.miss[peak] / 1e6;
-      cost += (usage.cacheReadTokens || 0) * p.hit[peak] / 1e6;
-      cost += (usage.outputTokens || 0) * p.out[peak] / 1e6;
-      return cost;
+      var total = 0;
+      var priced = 0;
+      usageList.forEach(function (u) {
+        var key = priceKeyFor(u.model);
+        if (!key) return;
+        var p = PRICES[key];
+        var missTokens = (u.input || 0) + (u.cacheWrite || 0);
+        total += missTokens * p.miss[peak] / 1e6;
+        total += (u.cacheRead || 0) * p.hit[peak] / 1e6;
+        total += (u.output || 0) * p.out[peak] / 1e6;
+        priced++;
+      });
+      return priced > 0 ? total : null;
     }
 
     function fmtCost(cost) {
@@ -70,18 +78,21 @@ window.__ModuleLoader__.load({
       return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
     }
 
-    function cacheHitPercent(usage) {
-      var total = (usage.uncachedInputTokens || 0) + (usage.cacheReadTokens || 0) + (usage.cacheWriteTokens || 0);
-      if (total <= 0) return null;
-      return Math.round((usage.cacheReadTokens || 0) / total * 100);
-    }
-
-    function loadBalance() {
-      return fetch(ENDPOINT, { headers: { accept: "application/json" } })
+    function loadBalance(sessionId) {
+      var url = ENDPOINT;
+      if (sessionId) url += "?session=" + encodeURIComponent(sessionId);
+      return fetch(url, { headers: { accept: "application/json" } })
         .then(function (r) {
           if (!r.ok) return { status: "error", message: "余额接口 HTTP " + r.status, at: Date.now() };
           return r.json().then(function (res) {
-            if (res && res.ok) return { status: "ok", data: res.data, model: res.model || "", at: res.at || Date.now() };
+            if (res && res.ok) {
+              return {
+                status: "ok",
+                data: res.data,
+                usage: Array.isArray(res.usage) ? res.usage : [],
+                at: res.at || Date.now(),
+              };
+            }
             return { status: "error", message: (res && res.error) || "未知错误", at: Date.now() };
           }).catch(function () {
             return { status: "error", message: "余额接口响应不是有效 JSON", at: Date.now() };
@@ -93,16 +104,15 @@ window.__ModuleLoader__.load({
     }
 
     function DockView(props) {
-      var useProjection = props && props.useProjection;
-      var usage = useProjection ? useProjection("tokenUsage") : undefined;
-      var pair = react.useState({ status: "loading", model: "" });
+      var sessionId = props && props.sessionId;
+      var pair = react.useState({ status: "loading", usage: [] });
       var state = pair[0];
       var setState = pair[1];
 
       react.useEffect(function () {
         var alive = true;
         function tick() {
-          loadBalance().then(function (next) {
+          loadBalance(sessionId).then(function (next) {
             if (alive) setState(next);
           });
         }
@@ -112,13 +122,12 @@ window.__ModuleLoader__.load({
           alive = false;
           clearInterval(timer);
         };
-      }, []);
+      }, [sessionId]);
 
       var dotColor = state.status === "error" ? "#f87171" : state.status === "loading" ? "#fbbf24" : "#34d399";
       var text;
       var title;
-      var priceKey = priceKeyFor(state.model);
-      var cost = usage ? computeCost(usage, state.model) : null;
+      var cost = totalCost(state.usage);
       var peak = isPeakNow() ? "高峰时段" : "空闲时段";
 
       if (state.status === "error") {
@@ -137,7 +146,7 @@ window.__ModuleLoader__.load({
             return (b.currency || "?") + " " + (b.total_balance != null ? b.total_balance : "?");
           }).join(" / ");
           text = "DeepSeek 余额 " + balanceText;
-          if (usage && cost !== null && (usage.outputTokens > 0 || (usage.uncachedInputTokens || 0) > 0 || (usage.cacheReadTokens || 0) > 0)) {
+          if (cost !== null) {
             text += " ｜ 本会话 ¥" + fmtCost(cost);
           }
           var lines = infos.map(function (b) {
@@ -147,16 +156,16 @@ window.__ModuleLoader__.load({
               "，充值 " + (b.topped_up_balance != null ? b.topped_up_balance : "?") +
               "，账户可用 " + (state.data.is_available === true ? "是" : state.data.is_available === false ? "否" : "?");
           });
-          if (usage) {
-            var hit = cacheHitPercent(usage);
-            lines.push(
-              "本会话 tokens：输入 " + fmtTokens((usage.uncachedInputTokens || 0) + (usage.cacheWriteTokens || 0) + (usage.cacheReadTokens || 0)) +
-              "（缓存命中 " + (hit === null ? "—" : hit + "%" + "，读取 " + fmtTokens(usage.cacheReadTokens || 0) + "，写入 " + fmtTokens(usage.cacheWriteTokens || 0) + "）") +
-              "，输出 " + fmtTokens(usage.outputTokens || 0)
-            );
-            lines.push("计价：按 " + (priceKey || "未知模型") + "（" + peak + "）");
+          if (Array.isArray(state.usage) && state.usage.length > 0) {
+            lines.push("本次会话按模型用量：");
+            state.usage.forEach(function (u) {
+              var totalIn = (u.input || 0) + (u.cacheRead || 0) + (u.cacheWrite || 0);
+              lines.push("  " + (u.model || "?") + "：输入 " + fmtTokens(totalIn) +
+                "（未命中 " + fmtTokens(u.input || 0) + "，命中 " + fmtTokens(u.cacheRead || 0) + "，写入 " + fmtTokens(u.cacheWrite || 0) + "），输出 " + fmtTokens(u.output || 0));
+            });
+            lines.push("计价：" + peak + "，缓存写入按未命中输入价");
             if (cost === null) {
-              lines.push("当前模型 " + (state.model || "?") + " 不在 DeepSeek 定价表（仅 deepseek-v4-flash / deepseek-v4-pro），无法估算消费");
+              lines.push("无 DeepSeek 定价表内模型（仅 deepseek-v4-flash / deepseek-v4-pro），无法估算消费");
             } else {
               lines.push("本次会话消费：¥" + fmtCost(cost));
             }
@@ -187,7 +196,10 @@ window.__ModuleLoader__.load({
         return ctx.slots.register(
           { name: "conversation.composer.dock", id: "deepseek-balance", order: 1 },
           function (props) {
-            return react.createElement(DockView, { useProjection: props && props.useProjection });
+            return react.createElement(DockView, {
+              sessionId: props && props.sessionId,
+              useProjection: props && props.useProjection,
+            });
           },
         );
       });

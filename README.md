@@ -33,19 +33,19 @@ dsh plugin add /path/to/dsh-deepseek-balance
 
 - 余额条显示在会话输入框下方：`● DeepSeek 余额 ¥71.33 ｜ 本会话 ¥4.85`
   - 绿点 = 正常，黄点 = 加载中，红点 = 获取失败
-  - 「本会话消费」按**官网最新定价**（deepseek-v4-flash / deepseek-v4-pro）计算，自动区分**高峰/空闲时段**（北京时间 9:00-12:00、14:00-18:00 为高峰，其余空闲），每 15 秒与余额一同刷新
+  - 「本会话消费」**按会话实际使用的模型分模型计价**（从会话日志逐次提取每个模型调用的 token 用量），仅 deepseek-v4-flash / deepseek-v4-pro 套用官网价格，自动区分**高峰/空闲时段**（北京时间 9:00-12:00、14:00-18:00 为高峰，其余空闲），每 15 秒与余额一同刷新
 - 悬停（hover）余额条可查看完整明细：
   - 各币种余额：总额 / 赠送 / 充值 / 账户可用状态
-  - 本次会话 token 用量：输入（缓存命中率/读取/写入）、输出
-  - 计价模型与当前时段、本次会话消费金额
-- 说明：会话内切换过模型时按「当前模型」估算消费（token 投影不区分模型）；缓存写入按缓存未命中输入价计（官方价格表仅区分命中/未命中）
+  - 本次会话**按模型分列**的 token 用量：输入（未命中/命中/写入）、输出
+  - 当前时段、本次会话消费金额
+- 说明：非 DeepSeek 模型（如第三方 "…-pro"）不套用 DeepSeek 价格表、不计入消费金额；缓存写入按缓存未命中输入价计（官方价格表仅区分命中/未命中）
 
 ## 原理
 
 | 端 | 职责 |
 |---|---|
-| Host | `credentials.resolve('DEEPSEEK_API_KEY')` → `subprocess` 调用 `curl` 请求官方余额接口 → 通过 `webServer` 暴露 `GET /api/deepseek-balance`（响应含当前默认模型） |
-| Client | 浏览器 `fetch('/api/deepseek-balance')` 每 15s 轮询余额与模型 → `useProjection('tokenUsage')` 实时读取本会话累计 token → 按官网定价表 + 北京时间峰谷时段本地计价 |
+| Host | `credentials.resolve('DEEPSEEK_API_KEY')` → `subprocess` 调用 `curl` 请求官方余额接口；同时读取本会话日志（`sessionQuery.readSession`），按 `request/header` 的模型与 `assistant/message` 的 usage 逐次配对、**按模型聚合 token** → 通过 `webServer` 暴露 `GET /api/deepseek-balance?session=<id>` |
+| Client | 浏览器 `fetch('/api/deepseek-balance?session=<id>')` 每 15s 轮询余额与分模型用量 → 按官网定价表 + 北京时间峰谷时段本地计价（非 DeepSeek 模型跳过） |
 
 API Key 只存在于 Host 进程的 curl 子进程参数中，浏览器端只能拿到余额 JSON。
 
